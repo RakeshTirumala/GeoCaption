@@ -56,6 +56,9 @@ import pickle
 dataImages = pickle.load(open("dataImages.pkl", "rb"))
 dataCaptions = pickle.load(open("dataCaptions.pkl", "rb"))
 dataFilename = pickle.load(open("dataFilename.pkl", "rb"))
+dataImages = dataImages[:3087]
+dataCaptions = dataCaptions[:3087]
+dataFilename = dataFilename[:3087]
 print("Loaded data!!!")
 
 # %%
@@ -124,7 +127,7 @@ print("WordMap loaded!!!")
 from torchvision.models import DenseNet201_Weights
 
 numOfDataImages = len(dataImages)
-splitIndex = round(0.80 * numOfDataImages)
+splitIndex = round(0.70 * numOfDataImages)
 trainingSetImages = dataImages[:splitIndex]
 testingSetImages = dataImages[splitIndex:]
 print("Done!!")
@@ -184,7 +187,7 @@ import pickle
 # allImagesFeatureMap = pickle.load(open("allImagesFeatureMap.pkl", "rb"))
 # print("Loaded!!!")
 fetchedFeaturesMap = {}
-for mc in range(1, 11):
+for mc in range(1, 4):
     with open("P:/Folder Bulbasaur/MajorProject_RSIC/allImagesFeatureMap" + str(mc) + ".pkl", "rb") as f:
         features = pickle.load(f)
         fetchedFeaturesMap.update(features)
@@ -278,7 +281,7 @@ from transformers import AutoTokenizer
 
 train_generator = CustomDataGenerator(X=trainingSetImages,
                                       y=dataCaptions[:splitIndex],
-                                      batch_size=8,
+                                      batch_size=32,
                                       tokenizer=AutoTokenizer.from_pretrained('bert-base-uncased'),
                                       dataFilename=dataFilename[:splitIndex],
                                       vocab_size=len(wordMap),
@@ -288,7 +291,7 @@ train_generator = CustomDataGenerator(X=trainingSetImages,
 
 validation_generator = CustomDataGenerator(X=testingSetImages,
                                            y=dataCaptions[splitIndex:],
-                                           batch_size=8,
+                                           batch_size=32,
                                            tokenizer=AutoTokenizer.from_pretrained('bert-base-uncased'),
                                            dataFilename=dataFilename[splitIndex:],
                                            vocab_size=len(wordMap),
@@ -312,18 +315,18 @@ class CaptionModel(nn.Module):
         self.max_length = max_length
         self.batch_size = batch_size
         self.img_features = nn.Sequential(nn.Flatten(),
-                                          nn.Linear(1920*7*7, 256),
+                                          nn.Linear(1920*7*7, 1024),
                                           nn.ReLU())
-        self.embedding = nn.Embedding(self.vocab_size+1, 256)
+        self.embedding = nn.Embedding(self.vocab_size+1, 1024)
         # self.sentence_features = nn.Sequential(
         #                             nn.Linear(self.max_length, self.vocab_size+1))
 
-        self.gru = nn.GRU(input_size=256,hidden_size=256, num_layers=10,
+        self.gru = nn.GRU(input_size=1209,hidden_size=1024, num_layers=4,
                           bias=True, batch_first=False, dropout=0.5, bidirectional=False)
         self.dropout1 = nn.Dropout(0.5)
-        self.fc1 = nn.Linear(256,256)
+        self.fc1 = nn.Linear(1024, self.max_length)
         self.dropout2 = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(256,202)
+        self.fc2 = nn.Linear(self.max_length, self.vocab_size+1)
 
     def forward(self, input1, input2):
 
@@ -331,30 +334,40 @@ class CaptionModel(nn.Module):
         # x = self.embedding(input2)
         # x = x.view(x.size(0), -1)
         # sentence_features = self.sentence_features(input2)
+        print("loaded img_features")
         sentence_features = self.embedding(input2)
+        print("Loaded sentence_features")
+        sentence_features = torch.argmax(sentence_features, dim=-1)
 
         print("ImgF:", img_features.shape, "SF:", sentence_features.shape)
-        merged = torch.cat((img_features.unsqueeze(1), sentence_features), dim=1)
+        merged = torch.cat((img_features, sentence_features), dim=1)
+        print("concating completed")
         sentence_features, _ = self.gru(merged)
-
+        print("GRU layer completed!")
+        print("SF:", sentence_features.to('cpu').detach().numpy().shape)
         x = self.dropout1(sentence_features)
-        img_features = self.img_features(input1).unsqueeze(1).expand(-1, x.size(1), -1)
+        print("Dropout1")
         print("x shape:", x.shape, "img_features shape:", img_features.shape)
 
         x = torch.add(x, img_features)
+        print("Completed torch.add")
         x = self.fc1(x)
+        print("Completed fc1")
         x = nn.ReLU()(x)
-        x = self.dropout2(x)
-        x = self.fc2(x)
+        print("Completed Relu")
+        # x = self.dropout2(x)
+        # x = self.fc2(x)
+        # print("Completed fc2")
         x = nn.Softmax(dim=1)(x)
+        print("Completed softmax")
 
         return x
 
 
 vocab_size = len(wordMap)
-caption_model = CaptionModel(vocab_size, maxLengthOfCaption, batch_size=8).to(device=device)
+caption_model = CaptionModel(vocab_size, maxLengthOfCaption, batch_size=32).to(device=device)
 
-model_optimizer = optim.Adam(caption_model.parameters(), lr=1e-3, betas=(0.9, 0.999), eps=1e-08)
+model_optimizer = optim.Adam(caption_model.parameters(), lr=1e-5, betas=(0.9, 0.999), eps=1e-08)
 criterion = nn.CrossEntropyLoss().to(device=device)
 
 
@@ -371,7 +384,7 @@ print("Done!!!--Caption model summary--")
 # %%
 # Train the model
 #
-num_epochs = 6
+num_epochs = 1
 train_lossL = []
 valid_lossL = []
 train_accL = []
@@ -381,6 +394,7 @@ for epoch in range(num_epochs):
     train_loss = 0
     train_correct = 0
     train_total = 0
+    train_acc= []
     print("epoch:",epoch)
     caption_model.train()
     print("TrainGene:")
@@ -396,21 +410,34 @@ for epoch in range(num_epochs):
         print(outputs)
         print("Loss...")
 
-        y = torch.argmax(y, dim=-1)
-        print(y.shape)
+        y = torch.argmax(y, dim=-1).to(torch.float32)
+        # y = torch.squeeze(y, dim=1)
+
+        try:
+            print("y:", y.shape, "output:", outputs.to('cpu').detach().numpy().shape)
+        except:
+            print("Error!")
 
         loss = criterion(outputs, y)
+
+        print("got the loss!")
         loss.backward()
+        print("<--backword")
         model_optimizer.step()
         train_loss += loss.item()
 
         # Calculate training accuracy
-        _, predicted = torch.max(outputs.data, 1)
-        train_total += y.size(0)
-        train_correct += (predicted == y).sum().item()
+        predicted_labels = torch.argmax(outputs)
+        train_correct = torch.sum(predicted_labels == y)
+        print("train_correct:", train_correct)
+        # accuracy = train_correct / y.size(0)
+        # # train_acc += accuracy.item()
+        # print("Accuracy:", accuracy.item())
 
-    train_acc = train_correct / train_total
-    train_accL.append(train_acc)
+    train_accuracy = train_correct / train_total
+    train_accL.append(train_accuracy)
+    # print(train_accL)
+
     print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
         epoch, batch_idx * len(X1), len(train_generator.dataset),
                100. * batch_idx / len(train_generator), loss.item()))
@@ -422,6 +449,7 @@ for epoch in range(num_epochs):
     val_loss = 0
     val_correct = 0
     val_total = 0
+    val_acc = []
 
     caption_model.eval()
     with torch.no_grad():
@@ -434,37 +462,62 @@ for epoch in range(num_epochs):
             outputs = caption_model(X1.to(torch.float32), X2.to(torch.long))
             print("Loss...")
 
-            y = torch.argmax(y, dim=-1)
+            y = torch.argmax(y, dim=-1).to(torch.float32)
             print(y.shape)
 
             loss = criterion(outputs, y)
             val_loss += loss.item()
 
             # Calculate validation accuracy
-            _, predicted = torch.max(outputs.data, 1)
-            val_total += y.size(0)
-            val_correct += (predicted == y).sum().item()
 
-    val_acc = val_correct / val_total
-    valid_accL.append(val_acc)
+            predicted_labels = torch.argmax(outputs)
+            val_correct = torch.sum(predicted_labels == y)
+            print("val_correct:", val_correct)
+            accuracy = val_correct / y.size(0)
+            # val_acc += accuracy.item()
+            print("vAccuracy:", accuracy.item())
+
+    # val_accuracy = val_correct / val_total
+            valid_accL.append(accuracy.item())
+    # print(valid_accL)
+
     val_loss /= len(validation_generator)
     valid_lossL.append(val_loss)
     print("Valid Loss len:", len(valid_lossL))
 
-    print('Epoch: {}\tTraining Loss: {:.6f}\tValidation Loss: {:.6f}'.format(
-        epoch, train_loss, val_loss))
+    print('Epoch: {}\tTraining Loss: {:.2f}\tValidation Loss: {:.2f}\tTraining Accuracy:{:.2f} \tValidation Accuracy:{:.2f}'.format(
+        epoch, train_loss, val_loss, train_accL[-1], valid_accL[-1]))
+
+    print("Saving the model and other stats")
+    torch.save(caption_model.state_dict(), 'ImageCaptioningModel.pth')
+
+    pickle.dump(train_accL,  open("train_accuracy.pkl", "wb"))
+    pickle.dump(valid_accL,  open("valid_accuracy.pkl", "wb"))
+    pickle.dump(train_lossL, open("train_loss.pkl", "wb"))
+    pickle.dump(valid_lossL, open("valid_loss.pkl", "wb"))
+
+    print("moving to the next epoch...")
 
 print("Model training completed!!!")
 #%%
-torch.save(caption_model.state_dict(), 'ImageCaptioningModel.pth')
-
-pickle.dump(train_accL,  open("train_accuracy.pkl", "wb"))
-pickle.dump(valid_accL,  open("valid_accuracy.pkl", "wb"))
-pickle.dump(train_lossL, open("train_loss.pkl", "wb"))
-pickle.dump(valid_lossL, open("valid_loss.pkl", "wb"))
-
-print("Saved the model and other stats...")
+# torch.save(caption_model.state_dict(), 'ImageCaptioningModel.pth')
+#
+# pickle.dump(train_accL,  open("train_accuracy.pkl", "wb"))
+# pickle.dump(valid_accL,  open("valid_accuracy.pkl", "wb"))
+# pickle.dump(train_lossL, open("train_loss.pkl", "wb"))
+# pickle.dump(valid_lossL, open("valid_loss.pkl", "wb"))
+#
+# print("Saved the model and other stats...")
 
 #%%
 # saved_model = CaptionModel(vocab_size, maxLengthOfCaption, batch_size=8)
 # saved_model.load_state_dict(torch.load('ImageCaptioningModel.pth'))
+
+#%%
+import matplotlib.pyplot as plt
+import pickle
+import torch
+# training_accuracy = pickle.load(open("train_accuracy.pkl", "rb"))
+# valid_accuracy = pickle.load(open("valid_accuracy.pkl", "rb"))
+# print(training_accuracy)
+training_loss = pickle.load(open("train_loss.pkl", "rb"))
